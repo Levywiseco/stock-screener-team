@@ -71,13 +71,15 @@ jobs:
           retention-days: 30
 
       - name: 发送企业微信通知（可选）
-        if: ${{ secrets.WECHAT_WEBHOOK != '' }}
+        if: ${{ env.WECHAT_WEBHOOK != '' }}
+        env:
+          WECHAT_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
         run: |
           if [ -f output/latest_results.json ]; then
             REVERSAL=$(python -c "import json; d=json.load(open('output/latest_results.json')); print(d['reversal']['count'])")
             VOLUME=$(python -c "import json; d=json.load(open('output/latest_results.json')); print(d['volume_breakout']['count'])")
             SHRINK=$(python -c "import json; d=json.load(open('output/latest_results.json')); print(d['shrink_breakout']['count'])")
-            curl -s -X POST "${{ secrets.WECHAT_WEBHOOK }}" \
+            curl -s -X POST "$WECHAT_WEBHOOK" \
               -H "Content-Type: application/json" \
               -d "{
                 \"msgtype\": \"markdown\",
@@ -88,7 +90,9 @@ jobs:
           fi
 
       - name: 发送邮件通知（可选）
-        if: ${{ secrets.NOTIFICATION_EMAIL != '' }}
+        if: ${{ env.NOTIFICATION_EMAIL != '' }}
+        env:
+          NOTIFICATION_EMAIL: ${{ secrets.NOTIFICATION_EMAIL }}
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
