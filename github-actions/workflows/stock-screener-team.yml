@@ -1,0 +1,108 @@
+name: A股三合一多策略选股器
+
+on:
+  # 定时执行：每个交易日收盘后（北京时间18:00 = UTC 10:00）
+  schedule:
+    - cron: '0 10 * * 1-5'  # 周一到周五 UTC 10:00
+
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      use_claude_analysis:
+        description: '是否使用 Claude AI 分析'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  stock-screening:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60  # 串行遍历全市场需要更多时间
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安装依赖
+        run: |
+          pip install --upgrade pip
+          pip install -r github-actions/requirements.txt
+
+      - name: 运行三合一选股筛选
+        id: screening
+        env:
+          OUTPUT_DIR: ${{ github.workspace }}/output
+        run: |
+          mkdir -p output
+          python github-actions/combined_screener_cloud.py
+
+      - name: Claude AI 分析（可选）
+        if: ${{ github.event.inputs.use_claude_analysis != 'false' }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+          CLAUDE_MODEL: ${{ secrets.CLAUDE_MODEL }}
+          OUTPUT_DIR: ${{ github.workspace }}/output
+        run: |
+          if [ -n "$ANTHROPIC_API_KEY" ]; then
+            python github-actions/claude_agent_runner.py
+          else
+            echo "未配置 ANTHROPIC_API_KEY，跳过 AI 分析"
+          fi
+
+      - name: 上传筛选结果
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stock-screening-results-${{ github.run_number }}
+          path: |
+            output/*.csv
+            output/*.json
+            output/*.md
+          retention-days: 30
+
+      - name: 发送企业微信通知（可选）
+        if: ${{ secrets.WECHAT_WEBHOOK != '' }}
+        run: |
+          if [ -f output/latest_results.json ]; then
+            REVERSAL=$(python -c "import json; d=json.load(open('output/latest_results.json')); print(d['reversal']['count'])")
+            VOLUME=$(python -c "import json; d=json.load(open('output/latest_results.json')); print(d['volume_breakout']['count'])")
+            SHRINK=$(python -c "import json; d=json.load(open('output/latest_results.json')); print(d['shrink_breakout']['count'])")
+            curl -s -X POST "${{ secrets.WECHAT_WEBHOOK }}" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"msgtype\": \"markdown\",
+                \"markdown\": {
+                  \"content\": \"## A股三合一选股完成\n> 三日反转: **${REVERSAL}** 只\n> 放量突破: **${VOLUME}** 只\n> 缩量突破: **${SHRINK}** 只\n> [查看详情](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\"
+                }
+              }"
+          fi
+
+      - name: 发送邮件通知（可选）
+        if: ${{ secrets.NOTIFICATION_EMAIL != '' }}
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "A股三合一选股结果 - ${{ github.run_number }}"
+          to: ${{ secrets.NOTIFICATION_EMAIL }}
+          from: Stock Screener Bot
+          body: |
+            A股三合一多策略选股已完成。
+
+            请查看 GitHub Actions 运行结果：
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            或下载附件查看详细结果。
+          attachments: output/results.md
