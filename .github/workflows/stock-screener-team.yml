@@ -20,7 +20,7 @@ on:
 jobs:
   stock-screening:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # 串行遍历全市场需要更多时间
+    timeout-minutes: 90  # 无预筛选时串行遍历全市场约50分钟+AI分析
 
     steps:
       - name: 检出代码

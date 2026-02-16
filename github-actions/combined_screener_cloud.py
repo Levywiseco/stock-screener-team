@@ -192,8 +192,8 @@ class CombinedScreenerCloud:
     def get_realtime_filter(self):
         """东方财富API获取今日行情，预筛选阳线股票（所有策略都要求最后一天收阳）"""
         print("正在获取今日实时行情进行预筛选...")
-        url = ("http://82.push2.eastmoney.com/api/qt/clist/get?"
-               "pn=1&pz=10000&po=1&np=1&"
+        url = ("https://82.push2.eastmoney.com/api/qt/clist/get?"
+               "pn=1&pz=50000&po=1&np=1&"
                "ut=bd1d9ddb04089700cf9c27f6f7426281&"
                "fltt=2&invt=2&fid=f3&"
                "fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048&"
@@ -208,6 +208,7 @@ class CombinedScreenerCloud:
             data = json.loads(response.read().decode('utf-8'))
 
             if data.get('data') and data['data'].get('diff'):
+                total_stocks = len(data['data']['diff'])
                 positive_codes = set()
                 for item in data['data']['diff']:
                     code = str(item.get('f12', ''))
@@ -232,7 +233,15 @@ class CombinedScreenerCloud:
                     if close > open_price and volume > 0:
                         positive_codes.add(code)
 
-                print(f"今日阳线股票: {len(positive_codes)} 只")
+                print(f"东方财富返回 {total_stocks} 只股票，其中阳线: {len(positive_codes)} 只")
+
+                # 安全阈值：正常交易日阳线股票应有数百只以上
+                # 如果太少（<200），说明数据异常（非交易日/API问题），放弃预筛选
+                if len(positive_codes) < 200:
+                    print(f"阳线数量异常偏少（{len(positive_codes)} < 200），"
+                          "可能为非交易日或API数据异常，跳过预筛选")
+                    return None
+
                 return positive_codes
         except Exception as e:
             print(f"实时行情获取失败: {e}，将不进行预筛选")
@@ -947,7 +956,7 @@ class CombinedScreenerCloud:
         print("=" * 70)
 
         start_time = time.time()
-        max_elapsed = 2700  # 45分钟超时保护，留时间给AI分析和上传
+        max_elapsed = 4200  # 70分钟超时保护，留时间给AI分析和上传
 
         if not self.login():
             return
