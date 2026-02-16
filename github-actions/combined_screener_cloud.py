@@ -12,7 +12,12 @@ import re
 import warnings
 import time
 import os
+import sys
 import json
+
+# 确保输出不被缓冲（GitHub Actions 环境）
+if not sys.stdout.line_buffering:
+    sys.stdout.reconfigure(line_buffering=True)
 
 warnings.filterwarnings('ignore')
 
@@ -183,6 +188,56 @@ class CombinedScreenerCloud:
         except Exception as e:
             print(f"获取最新名称失败: {e}")
         return name_map
+
+    def get_realtime_filter(self):
+        """东方财富API获取今日行情，预筛选阳线股票（所有策略都要求最后一天收阳）"""
+        print("正在获取今日实时行情进行预筛选...")
+        url = ("http://82.push2.eastmoney.com/api/qt/clist/get?"
+               "pn=1&pz=10000&po=1&np=1&"
+               "ut=bd1d9ddb04089700cf9c27f6f7426281&"
+               "fltt=2&invt=2&fid=f3&"
+               "fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048&"
+               "fields=f12,f14,f2,f17,f5")
+        # f12=代码, f14=名称, f2=最新价, f17=开盘价, f5=成交量(手)
+
+        try:
+            req = urllib.request.Request(url, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+            response = urllib.request.urlopen(req, timeout=30)
+            data = json.loads(response.read().decode('utf-8'))
+
+            if data.get('data') and data['data'].get('diff'):
+                positive_codes = set()
+                for item in data['data']['diff']:
+                    code = str(item.get('f12', ''))
+                    close = item.get('f2')
+                    open_price = item.get('f17')
+                    volume = item.get('f5')
+
+                    # 跳过无效数据（停牌等）
+                    if close is None or open_price is None or volume is None:
+                        continue
+                    if close == '-' or open_price == '-':
+                        continue
+
+                    try:
+                        close = float(close)
+                        open_price = float(open_price)
+                        volume = int(volume)
+                    except (ValueError, TypeError):
+                        continue
+
+                    # 阳线 + 有成交量
+                    if close > open_price and volume > 0:
+                        positive_codes.add(code)
+
+                print(f"今日阳线股票: {len(positive_codes)} 只")
+                return positive_codes
+        except Exception as e:
+            print(f"实时行情获取失败: {e}，将不进行预筛选")
+
+        return None  # 返回None表示不预筛选
 
     # ==================== 策略1: 三日反转 ====================
 
@@ -888,10 +943,11 @@ class CombinedScreenerCloud:
         print("=" * 70)
         print("A股三合一多策略选股器 (GitHub Actions 云端版)")
         print("策略: 三日反转 | 放量突破 | 缩量突破")
-        print("数据源: BaoStock (串行遍历)")
+        print("数据源: BaoStock (串行遍历) + 东方财富 (预筛选)")
         print("=" * 70)
 
         start_time = time.time()
+        max_elapsed = 2700  # 45分钟超时保护，留时间给AI分析和上传
 
         if not self.login():
             return
@@ -902,15 +958,36 @@ class CombinedScreenerCloud:
                 print("获取股票列表失败，退出")
                 return
 
+            # 预筛选：用东方财富API获取今日阳线股票，大幅缩小扫描范围
+            positive_codes = self.get_realtime_filter()
+            if positive_codes is not None:
+                before = len(stocks)
+                stocks = [s for s in stocks if s['code'] in positive_codes]
+                print(f"预筛选: {before} → {len(stocks)} 只 (仅保留今日阳线)")
+            else:
+                print("预筛选失败，将遍历全部股票（耗时较长）")
+
             print(f"\n开始筛选（串行遍历 {len(stocks)} 只股票）...")
             reversal_results = []
             volume_results = []
             shrink_results = []
             total = len(stocks)
+            timeout_hit = False
 
             for i, stock in enumerate(stocks):
-                if (i + 1) % 200 == 0:
-                    print(f"进度: {i+1}/{total} ({(i+1)*100//total}%)")
+                # 超时保护
+                elapsed = time.time() - start_time
+                if elapsed > max_elapsed:
+                    print(f"\n⚠ 已运行 {elapsed:.0f}秒，触发超时保护，保存已有结果")
+                    timeout_hit = True
+                    break
+
+                if (i + 1) % 100 == 0:
+                    elapsed = time.time() - start_time
+                    rate = (i + 1) / elapsed if elapsed > 0 else 0
+                    eta = (total - i - 1) / rate if rate > 0 else 0
+                    print(f"进度: {i+1}/{total} ({(i+1)*100//total}%) | "
+                          f"耗时: {elapsed:.0f}s | 预计剩余: {eta:.0f}s")
                 try:
                     result = self.screen_single_stock(stock['bs_code'], stock['code'], stock['name'])
                     if result:
@@ -947,16 +1024,19 @@ class CombinedScreenerCloud:
                         r['name'] = name_map[r['code']]
 
             elapsed = time.time() - start_time
+            scanned = i + 1 if timeout_hit else total
 
             # 保存结果
-            self._save_results(reversal_results, volume_results, shrink_results, total, elapsed)
+            self._save_results(reversal_results, volume_results, shrink_results,
+                               scanned, elapsed, timeout_hit)
 
         finally:
             self.logout()
 
     # ==================== 输出层 ====================
 
-    def _save_results(self, reversal_results, volume_results, shrink_results, total_scanned, elapsed):
+    def _save_results(self, reversal_results, volume_results, shrink_results,
+                       total_scanned, elapsed, timeout_hit=False):
         """保存结果到CSV/JSON/Markdown + GitHub Actions Summary"""
         output_dir = os.environ.get('OUTPUT_DIR', '.')
         os.makedirs(output_dir, exist_ok=True)
@@ -986,6 +1066,7 @@ class CombinedScreenerCloud:
             'timestamp': timestamp,
             'total_scanned': total_scanned,
             'elapsed_seconds': round(elapsed, 1),
+            'timeout_hit': timeout_hit,
             'reversal': {
                 'count': len(reversal_results),
                 'results': reversal_results
@@ -1006,7 +1087,7 @@ class CombinedScreenerCloud:
 
         # 保存 Markdown 报告
         md_content = self._format_markdown(
-            reversal_results, volume_results, shrink_results, total_scanned, elapsed
+            reversal_results, volume_results, shrink_results, total_scanned, elapsed, timeout_hit
         )
         md_path = os.path.join(output_dir, "results.md")
         with open(md_path, 'w', encoding='utf-8') as f:
@@ -1023,18 +1104,21 @@ class CombinedScreenerCloud:
         # 打印终端汇总
         print("\n" + "=" * 70)
         print(f"筛选完成！耗时: {elapsed:.1f}秒")
-        print(f"扫描股票: {total_scanned} 只")
+        print(f"扫描股票: {total_scanned} 只{' (超时中断)' if timeout_hit else ''}")
         print(f"三日反转: {len(reversal_results)} 只 | "
               f"放量突破: {len(volume_results)} 只 | "
               f"缩量突破: {len(shrink_results)} 只")
         print("=" * 70)
 
     def _format_markdown(self, reversal_results, volume_results, shrink_results,
-                         total_scanned, elapsed):
+                         total_scanned, elapsed, timeout_hit=False):
         """格式化Markdown报告"""
         md = f"## A股三合一多策略选股结果\n\n"
         md += f"**筛选时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        md += f"**扫描股票**: {total_scanned} 只 | **耗时**: {elapsed:.1f}秒\n\n"
+        md += f"**扫描股票**: {total_scanned} 只 | **耗时**: {elapsed:.1f}秒"
+        if timeout_hit:
+            md += " | **注意**: 超时保护触发，结果为部分扫描"
+        md += "\n\n"
 
         # 总览表
         md += "### 总览\n\n"
