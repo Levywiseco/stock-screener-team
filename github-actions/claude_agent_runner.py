@@ -135,8 +135,8 @@ def run_agent():
 
     client = anthropic.Anthropic(**client_kwargs)
 
-    # 支持通过环境变量切换模型
-    model = os.environ.get('CLAUDE_MODEL', 'claude-sonnet-4-5-20250929')
+    # 支持通过环境变量切换模型（空字符串也用默认值）
+    model = os.environ.get('CLAUDE_MODEL') or 'claude-sonnet-4-5-20250929'
 
     print("=" * 60)
     print("Claude Agent SDK 执行器 (tool_use 模式)")
